@@ -417,6 +417,7 @@ export default function AIAssistant() {
   const [conversationHistory, setConversationHistory] = useState<Array<{role: 'user' | 'assistant', content: string}>>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const [assistantMode, setAssistantMode] = useState<AssistantMode>('chat')
+  const [proposalDrafts, setProposalDrafts] = useState<Record<string, any>>({})
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false)
 
   const handlePersonalityChange = useCallback((personality: Personality) => {
@@ -478,6 +479,47 @@ export default function AIAssistant() {
         setMessages(prev => [...prev, aiMessage])
       }
       return
+    }
+
+    // Agent mode: quick auto-consent handler
+    // If user types a confirmation (e.g., "I confirm", "yes, place the call"),
+    // auto-execute the most recent pending proposal.
+    const consentRegex = /(i\s*confirm|yes[,!]?|go\s*ahead|place\s*the\s*call|do\s*it)/i
+    if (consentRegex.test(inputValue)) {
+      const pending = [...messages].reverse().find(m => m.proposal?.status === 'pending')
+      if (pending?.proposal) {
+        try {
+          const finalArgs = (() => {
+            if (pending.proposal!.tool === 'twilio.call') {
+              const draft = proposalDrafts[pending.id] || {}
+              return {
+                ...pending.proposal!.args,
+                to: draft.to || pending.proposal!.args?.to || '',
+                message: draft.message || pending.proposal!.args?.message || ''
+              }
+            }
+            return pending.proposal!.args
+          })()
+          const res = await fetch('/api/tools/execute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tool: pending.proposal!.tool, args: finalArgs })
+          })
+          const data = await res.json().catch(() => ({ ok: false, error: 'Bad JSON from tool' }))
+          setMessages(prev => prev.map(m => m.id === pending.id ? {
+            ...m,
+            proposal: { ...m.proposal!, status: data.ok ? 'accepted' : 'declined' },
+            toolResult: data
+          } : m))
+          try {
+            const url = data?.data?.gmaps_url
+            if (data?.ok && typeof url === 'string') window.open(url, '_blank')
+          } catch {}
+          return
+        } catch (e) {
+          // fall through to normal agent proposal if auto-consent fails
+        }
+      }
     }
 
     // Agent mode: tool proposals
@@ -730,18 +772,65 @@ export default function AIAssistant() {
                               {message.proposal.why && (
                                 <div className="text-xs opacity-70 mb-2">{message.proposal.why}</div>
                               )}
-                              <pre className="text-xs p-2 rounded-xl border border-white/20 overflow-x-auto mb-3" style={{ backgroundColor: `${activePersonality.color}08` }}>
+                              {/* Args preview or editable form for certain tools */}
+                              {message.proposal.tool === 'twilio.call' ? (
+                                <div className="mb-3 space-y-2">
+                                  <div className="flex flex-col gap-1">
+                                    <label className="text-xs opacity-80">Phone number</label>
+                                    <input
+                                      type="tel"
+                                      placeholder="+15551234567"
+                                      className="text-xs px-2 py-1 rounded-lg border border-white/20 bg-transparent"
+                                      style={{ color: activePersonality.textColor }}
+                                      value={proposalDrafts[message.id]?.to ?? ''}
+                                      onChange={(e) => setProposalDrafts(prev => ({
+                                        ...prev,
+                                        [message.id]: { ...prev[message.id], to: e.target.value }
+                                      }))}
+                                    />
+                                  </div>
+                                  <div className="flex flex-col gap-1">
+                                    <label className="text-xs opacity-80">Message to play</label>
+                                    <textarea
+                                      rows={3}
+                                      placeholder="I have arrived safely. Just letting you know."
+                                      className="text-xs px-2 py-1 rounded-lg border border-white/20 bg-transparent"
+                                      style={{ color: activePersonality.textColor }}
+                                      value={proposalDrafts[message.id]?.message ?? ''}
+                                      onChange={(e) => setProposalDrafts(prev => ({
+                                        ...prev,
+                                        [message.id]: { ...prev[message.id], message: e.target.value }
+                                      }))}
+                                    />
+                                  </div>
+                                </div>
+                              ) : (
+                                <pre className="text-xs p-2 rounded-xl border border-white/20 overflow-x-auto mb-3" style={{ backgroundColor: `${activePersonality.color}08` }}>
 {JSON.stringify(message.proposal.args, null, 2)}
-                              </pre>
+                                </pre>
+                              )}
                               {message.proposal.status === 'pending' && (
                                 <div className="flex gap-2">
                                   <button
                                     onClick={async () => {
                                       try {
+                                        // Merge draft inputs for special tools
+                                        const finalArgs = (() => {
+                                          if (message.proposal?.tool === 'twilio.call') {
+                                            const draft = proposalDrafts[message.id] || {}
+                                            return {
+                                              ...message.proposal.args,
+                                              to: draft.to || message.proposal.args?.to || '',
+                                              message: draft.message || message.proposal.args?.message || ''
+                                            }
+                                          }
+                                          return message.proposal!.args
+                                        })()
+
                                         const res = await fetch('/api/tools/execute', {
                                           method: 'POST',
                                           headers: { 'Content-Type': 'application/json' },
-                                          body: JSON.stringify({ tool: message.proposal!.tool, args: message.proposal!.args })
+                                          body: JSON.stringify({ tool: message.proposal!.tool, args: finalArgs })
                                         })
                                         const data = await res.json().catch(() => ({ ok: false, error: 'Bad JSON from tool' }))
                                         setMessages(prev => prev.map(m => m.id === message.id ? {

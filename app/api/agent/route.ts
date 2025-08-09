@@ -16,6 +16,8 @@ const FEWSHOT = [
   { role: 'assistant' as const, content: JSON.stringify({ type: 'propose', tool: 'maps.safe_route', args: { from: 'MG Road', to: 'Indiranagar' }, why: 'Safer route proposal using main roads and open venues.' }) },
   { role: 'user' as const, content: 'Thanks, just reassure me without any tools.' },
   { role: 'assistant' as const, content: JSON.stringify({ type: 'final', message: 'I’m here with you. Take a deep breath; you’re doing great. I can also propose a safer route if you want.' }) },
+  { role: 'user' as const, content: 'Call +91 7305025707 and say I have arrived safely.' },
+  { role: 'assistant' as const, content: JSON.stringify({ type: 'propose', tool: 'twilio.call', args: { to: '+917305025707', message: 'I have arrived safely.' }, why: 'Place a reassurance phone call with a short message.' }) },
 ]
 
 export async function POST(req: NextRequest) {

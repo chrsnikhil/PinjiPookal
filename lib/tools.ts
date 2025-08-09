@@ -122,9 +122,45 @@ const twilioSms: ToolDefinition<typeof smsSchema> = {
   },
 }
 
+// Twilio Voice call (stub for now; replace with real Twilio when secrets available)
+const callSchema = z.object({
+  to: z.string().min(6),
+  message: z.string().min(1),
+  voice: z.string().optional().default('alice')
+})
+
+const twilioCall: ToolDefinition<typeof callSchema> = {
+  name: 'twilio.call',
+  description: 'Place a reassurance phone call and play a short message (requires confirmation).',
+  schema: callSchema,
+  async execute(args) {
+    const sid = process.env.TWILIO_ACCOUNT_SID
+    const token = process.env.TWILIO_AUTH_TOKEN
+    const from = process.env.TWILIO_FROM_NUMBER
+    if (!sid || !token || !from) {
+      return { ok: false, error: 'Missing TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, or TWILIO_FROM_NUMBER' }
+    }
+    try {
+      const twilioMod: any = await import('twilio')
+      const twilio = (twilioMod as any).default || twilioMod
+      const client = twilio(sid, token)
+      const sayText = (args.message || '').toString()
+      const safe = sayText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      // Use India English; voice defaults to 'alice' unless specified
+      const voice = args.voice || 'alice'
+      const twiml = `<Response><Say language="en-IN" voice="${voice}">${safe}</Say></Response>`
+      const call = await client.calls.create({ to: args.to, from, twiml })
+      return { ok: true, data: { sid: call.sid, to: call.to, status: call.status } }
+    } catch (e: any) {
+      return { ok: false, error: e?.message || 'Failed to place call' }
+    }
+  }
+}
+
 export const toolRegistry: Record<string, ToolDefinition<any>> = {
   [mapsSafeRoute.name]: mapsSafeRoute,
   [twilioSms.name]: twilioSms,
+  [twilioCall.name]: twilioCall,
 }
 
 export function validateAndExecute(toolName: string, rawArgs: unknown): Promise<ToolExecutionResult> {
