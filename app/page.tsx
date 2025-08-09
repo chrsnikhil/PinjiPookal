@@ -820,12 +820,23 @@ export default function AIAssistant() {
                                             const draft = proposalDrafts[message.id] || {}
                                             return {
                                               ...message.proposal.args,
-                                              to: draft.to || message.proposal.args?.to || '',
-                                              message: draft.message || message.proposal.args?.message || ''
+                                              to: (draft.to ?? message.proposal.args?.to ?? '').toString().trim(),
+                                              message: (draft.message ?? message.proposal.args?.message ?? '').toString().trim()
                                             }
                                           }
                                           return message.proposal!.args
                                         })()
+
+                                        // Simple client-side validation for call
+                                        if (message.proposal?.tool === 'twilio.call') {
+                                          if (!finalArgs.to || !finalArgs.message) {
+                                            setMessages(prev => prev.map(m => m.id === message.id ? {
+                                              ...m,
+                                              toolResult: { ok: false, error: 'Please enter a phone number (E.164) and a message.' }
+                                            } : m))
+                                            return
+                                          }
+                                        }
 
                                         const res = await fetch('/api/tools/execute', {
                                           method: 'POST',
@@ -838,6 +849,8 @@ export default function AIAssistant() {
                                           proposal: { ...m.proposal!, status: data.ok ? 'accepted' : 'declined' },
                                           toolResult: data
                                         } : m))
+                                        // Clear draft for this proposal to avoid stale values
+                                        setProposalDrafts(prev => { const n = { ...prev }; delete n[message.id]; return n })
                                         // Auto-open Google Maps if present
                                         try {
                                           const url = data?.data?.gmaps_url
@@ -851,6 +864,7 @@ export default function AIAssistant() {
                                           proposal: { ...m.proposal!, status: 'declined' },
                                           toolResult: { ok: false, error: e?.message || 'Tool execution failed' }
                                         } : m))
+                                        setProposalDrafts(prev => { const n = { ...prev }; delete n[message.id]; return n })
                                       }
                                     }}
                                     className="px-3 py-1 rounded-lg border border-white/20"
