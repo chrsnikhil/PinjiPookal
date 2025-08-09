@@ -2,63 +2,27 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Mic, MicOff, Send, X } from 'lucide-react'
-
-interface Personality {
-  id: string
-  name: string
-  icon: string
-  color: string
-  bgGradient: string
-  textColor: string
-  description: string
-}
+import { Mic, MicOff, Send, X, Volume2, VolumeX } from 'lucide-react'
+import { personalities, getAIResponse, type Personality } from '@/lib/ai'
+import { validateAndExecute } from '@/lib/tools'
+import VoiceModal from '@/components/voice-modal'
 
 interface Message {
   id: string
   text: string
   isUser: boolean
   timestamp: Date
+  // Optional tool proposal/result metadata
+  proposal?: {
+    tool: string
+    args: any
+    why?: string
+    status?: 'pending' | 'accepted' | 'declined'
+  }
+  toolResult?: any
 }
 
-const personalities: Personality[] = [
-  {
-    id: 'lily',
-    name: 'Lily',
-    icon: '🌸',
-    color: '#9333ea',
-    bgGradient: 'from-purple-50 via-purple-100 to-purple-200',
-    textColor: '#7c3aed',
-    description: 'Gentle and nurturing'
-  },
-  {
-    id: 'sage',
-    name: 'Sage',
-    icon: '🌿',
-    color: '#059669',
-    bgGradient: 'from-emerald-50 via-emerald-100 to-emerald-200',
-    textColor: '#047857',
-    description: 'Wise and calming'
-  },
-  {
-    id: 'marigold',
-    name: 'Marigold',
-    icon: '🌻',
-    color: '#d97706',
-    bgGradient: 'from-amber-50 via-amber-100 to-amber-200',
-    textColor: '#b45309',
-    description: 'Warm and energetic'
-  },
-  {
-    id: 'orchid',
-    name: 'Orchid',
-    icon: '🌺',
-    color: '#dc2626',
-    bgGradient: 'from-rose-50 via-rose-100 to-rose-200',
-    textColor: '#be185d',
-    description: 'Elegant and sophisticated'
-  }
-]
+
 
 const LoadingScreen = ({ personality, onComplete }: { personality: Personality; onComplete: () => void }) => {
   useEffect(() => {
@@ -441,6 +405,7 @@ const VoiceMode = ({ personality, onExit }: { personality: Personality; onExit: 
 )
 
 export default function AIAssistant() {
+  type AssistantMode = 'chat' | 'agent'
   const [isLoading, setIsLoading] = useState(true)
   const [activePersonality, setActivePersonality] = useState(personalities[0])
   const [messages, setMessages] = useState<Message[]>([])
@@ -449,13 +414,17 @@ export default function AIAssistant() {
   const [isTransitioning, setIsTransitioning] = useState(false)
   const [hasStartedChat, setHasStartedChat] = useState(false)
   const [isPersonalityModalOpen, setIsPersonalityModalOpen] = useState(false)
+  const [conversationHistory, setConversationHistory] = useState<Array<{role: 'user' | 'assistant', content: string}>>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const [assistantMode, setAssistantMode] = useState<AssistantMode>('chat')
+  const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false)
 
   const handlePersonalityChange = useCallback((personality: Personality) => {
     if (personality.id === activePersonality.id) return
     
     setIsTransitioning(true)
     setMessages([])
+    setConversationHistory([])
     setHasStartedChat(false)
     
     setTimeout(() => {
@@ -464,7 +433,7 @@ export default function AIAssistant() {
     }, 300)
   }, [activePersonality.id])
 
-  const handleSendMessage = useCallback(() => {
+  const handleSendMessage = useCallback(async () => {
     if (!inputValue.trim()) return
 
     if (!hasStartedChat) {
@@ -481,17 +450,85 @@ export default function AIAssistant() {
     setMessages(prev => [...prev, userMessage])
     setInputValue('')
 
-    // Simulate AI response
-    setTimeout(() => {
+    if (assistantMode === 'chat') {
+      // Classic chatbot with personality
+      try {
+        const aiResponse = await getAIResponse(inputValue, activePersonality, conversationHistory)
+        const aiMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          text: aiResponse,
+          isUser: false,
+          timestamp: new Date()
+        }
+        const newHistory: Array<{role: 'user' | 'assistant', content: string}> = [
+          ...conversationHistory,
+          { role: 'user', content: inputValue },
+          { role: 'assistant', content: aiResponse }
+        ]
+        setConversationHistory(newHistory)
+        setMessages(prev => [...prev, aiMessage])
+      } catch (error) {
+        console.error('AI response error:', error)
+        const aiMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          text: `I'm here to help. How can I assist you today?`,
+          isUser: false,
+          timestamp: new Date()
+        }
+        setMessages(prev => [...prev, aiMessage])
+      }
+      return
+    }
+
+    // Agent mode: tool proposals
+    try {
+      const agentRes = await fetch('/api/agent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: [
+          ...messages.map(m => ({ role: m.isUser ? 'user' as const : 'assistant' as const, content: m.text })),
+          { role: 'user', content: inputValue }
+        ] })
+      })
+      const agentData = await agentRes.json()
+
+      if (agentData?.type === 'propose' && agentData.tool && agentData.args) {
+        const toolMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          text: `${activePersonality.name} proposes using ${agentData.tool}`,
+          isUser: false,
+          timestamp: new Date(),
+          proposal: { tool: agentData.tool, args: agentData.args, why: agentData.why, status: 'pending' }
+        }
+        setMessages(prev => [...prev, toolMessage])
+      } else if (agentData?.type === 'final' && agentData.message) {
+        const aiMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          text: agentData.message,
+          isUser: false,
+          timestamp: new Date()
+        }
+        setMessages(prev => [...prev, aiMessage])
+      } else {
+        const aiMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          text: typeof agentData === 'string' ? agentData : JSON.stringify(agentData),
+          isUser: false,
+          timestamp: new Date()
+        }
+        setMessages(prev => [...prev, aiMessage])
+      }
+    } catch (error) {
+      console.error('Agent error:', error)
       const aiMessage: Message = {
         id: (Date.now() + 1).toString(),
-        text: `Hello! I'm ${activePersonality.name}. ${activePersonality.description}. How can I help you today?`,
+        text: `I'm here to help. How can I assist you today?`,
         isUser: false,
         timestamp: new Date()
       }
       setMessages(prev => [...prev, aiMessage])
-    }, 1200)
-  }, [inputValue, activePersonality, hasStartedChat])
+    }
+  }, [inputValue, activePersonality, hasStartedChat, assistantMode, messages, conversationHistory])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -531,15 +568,22 @@ export default function AIAssistant() {
         onClose={() => setIsPersonalityModalOpen(false)}
       />
 
-      {/* Voice Mode Overlay */}
-      <AnimatePresence>
-        {isVoiceMode && (
-          <VoiceMode 
-            personality={activePersonality} 
-            onExit={() => setIsVoiceMode(false)} 
-          />
-        )}
-      </AnimatePresence>
+                  {/* Voice Mode Overlay */}
+            <AnimatePresence>
+              {isVoiceMode && (
+                <VoiceMode 
+                  personality={activePersonality} 
+                  onExit={() => setIsVoiceMode(false)} 
+                />
+              )}
+            </AnimatePresence>
+
+            {/* Voice Modal */}
+            <VoiceModal
+              isOpen={isVoiceModalOpen}
+              personality={activePersonality}
+              onClose={() => setIsVoiceModalOpen(false)}
+            />
 
       {/* Main Interface */}
       <AnimatePresence>
@@ -549,10 +593,10 @@ export default function AIAssistant() {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.6 }}
           >
-            {/* Top Left Voice Icon */}
+            {/* Open Voice Modal Button */}
             <div className="fixed top-8 left-8 z-40">
               <motion.button
-                onClick={() => setIsVoiceMode(true)}
+                onClick={() => setIsVoiceModalOpen(true)}
                 className="p-4 rounded-2xl backdrop-blur-md border border-white/20 shadow-xl transition-all duration-500 will-change-transform"
                 style={{ 
                   backgroundColor: `${activePersonality.color}15`,
@@ -568,7 +612,7 @@ export default function AIAssistant() {
               </motion.button>
             </div>
 
-            {/* Personality Button - Properly Centered */}
+            {/* Mode Toggle + Personality Button */}
             <div className="fixed top-8 left-1/2 z-40" style={{ transform: 'translateX(-50%)' }}>
               <motion.div
                 initial={{ opacity: 0, y: -20 }}
@@ -580,6 +624,22 @@ export default function AIAssistant() {
                   onClick={() => setIsPersonalityModalOpen(true)}
                 />
               </motion.div>
+              <div className="flex items-center justify-center gap-2 mt-2">
+                <button
+                  onClick={() => setAssistantMode('chat')}
+                  className={`px-3 py-1 rounded-lg text-xs border ${assistantMode==='chat' ? 'opacity-100' : 'opacity-70'}`}
+                  style={{ borderColor: `${activePersonality.color}30`, backgroundColor: assistantMode==='chat' ? `${activePersonality.color}15` : 'transparent', color: activePersonality.textColor }}
+                >
+                  Chat mode
+                </button>
+                <button
+                  onClick={() => setAssistantMode('agent')}
+                  className={`px-3 py-1 rounded-lg text-xs border ${assistantMode==='agent' ? 'opacity-100' : 'opacity-70'}`}
+                  style={{ borderColor: `${activePersonality.color}30`, backgroundColor: assistantMode==='agent' ? `${activePersonality.color}15` : 'transparent', color: activePersonality.textColor }}
+                >
+                  Agent mode
+                </button>
+              </div>
             </div>
 
             {/* Main Content */}
@@ -663,7 +723,96 @@ export default function AIAssistant() {
                           whileHover={{ scale: 1.02, y: -2 }}
                           transition={{ duration: 0.3 }}
                         >
-                          <p className="text-base leading-relaxed">{message.text}</p>
+                          {/* Proposal Card */}
+                          {message.proposal && (
+                            <div>
+                              <div className="text-sm font-semibold mb-1">Proposed: {message.proposal.tool}</div>
+                              {message.proposal.why && (
+                                <div className="text-xs opacity-70 mb-2">{message.proposal.why}</div>
+                              )}
+                              <pre className="text-xs p-2 rounded-xl border border-white/20 overflow-x-auto mb-3" style={{ backgroundColor: `${activePersonality.color}08` }}>
+{JSON.stringify(message.proposal.args, null, 2)}
+                              </pre>
+                              {message.proposal.status === 'pending' && (
+                                <div className="flex gap-2">
+                                  <button
+                                    onClick={async () => {
+                                      try {
+                                        const res = await fetch('/api/tools/execute', {
+                                          method: 'POST',
+                                          headers: { 'Content-Type': 'application/json' },
+                                          body: JSON.stringify({ tool: message.proposal!.tool, args: message.proposal!.args })
+                                        })
+                                        const data = await res.json().catch(() => ({ ok: false, error: 'Bad JSON from tool' }))
+                                        setMessages(prev => prev.map(m => m.id === message.id ? {
+                                          ...m,
+                                          proposal: { ...m.proposal!, status: data.ok ? 'accepted' : 'declined' },
+                                          toolResult: data
+                                        } : m))
+                                        // Auto-open Google Maps if present
+                                        try {
+                                          const url = data?.data?.gmaps_url
+                                          if (data?.ok && typeof url === 'string') {
+                                            window.open(url, '_blank')
+                                          }
+                                        } catch {}
+                                      } catch (e: any) {
+                                        setMessages(prev => prev.map(m => m.id === message.id ? {
+                                          ...m,
+                                          proposal: { ...m.proposal!, status: 'declined' },
+                                          toolResult: { ok: false, error: e?.message || 'Tool execution failed' }
+                                        } : m))
+                                      }
+                                    }}
+                                    className="px-3 py-1 rounded-lg border border-white/20"
+                                    style={{ backgroundColor: `${activePersonality.color}15` }}
+                                  >
+                                    Accept
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setMessages(prev => prev.map(m => m.id === message.id ? { ...m, proposal: { ...m.proposal!, status: 'declined' } } : m))
+                                    }}
+                                    className="px-3 py-1 rounded-lg border border-white/20"
+                                    style={{ backgroundColor: `${activePersonality.color}08` }}
+                                  >
+                                    Decline
+                                  </button>
+                                </div>
+                              )}
+                              {message.toolResult && message.toolResult.ok && message.toolResult.data && (
+                                <div className="mt-3 p-3 rounded-xl border border-white/20" style={{ backgroundColor: `${activePersonality.color}08` }}>
+                                  {/* Directions Result Card */}
+                                  {message.proposal?.tool === 'maps.safe_route' ? (
+                                    <div>
+                                      <div className="text-sm font-semibold mb-1">{message.toolResult.data.summary}</div>
+                                      <div className="text-xs opacity-80 mb-2">{message.toolResult.data.distance_text} • {message.toolResult.data.duration_text}</div>
+                                      {message.toolResult.data.static_map_url && (
+                                        <img src={message.toolResult.data.static_map_url} alt="Route preview" className="rounded-lg w-full mb-2" />
+                                      )}
+                                      {message.toolResult.data.gmaps_url && (
+                                        <a href={message.toolResult.data.gmaps_url} target="_blank" rel="noreferrer" className="text-xs underline">
+                                          Open in Google Maps
+                                        </a>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <pre className="text-xs overflow-x-auto">{JSON.stringify(message.toolResult.data, null, 2)}</pre>
+                                  )}
+                                </div>
+                              )}
+                              {message.toolResult && message.toolResult.ok === false && (
+                                <div className="mt-3 p-3 rounded-xl border border-white/20" style={{ backgroundColor: `${activePersonality.color}08` }}>
+                                  <div className="text-xs" style={{ color: activePersonality.textColor }}>
+                                    Tool error: {String(message.toolResult.error || 'Unknown error')}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {!message.proposal && (
+                            <p className="text-base leading-relaxed">{message.text}</p>
+                          )}
                         </motion.div>
                       </motion.div>
                     ))}
